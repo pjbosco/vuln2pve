@@ -22,18 +22,66 @@ config_file="$config_dir/vuln2pve/vuln2pve.conf"
 # shellcheck source=/dev/null
 [ -f "$config_file" ] && source "$config_file"
 
-# Color Codes
-NORMAL="\e[39m"
-BLUE="\e[34m"
-GREEN="\e[32m"
-RED="\e[31m"
+# Color codes
+NORMAL="\e[0m"
+BOLD="\e[1m"
+GREEN="\e[1;32m"
+RED="\e[1;31m"
+COLS=$(tput cols 2>/dev/null || echo 80)
 
-# Function to generate a qcow2 filename based on the original filename, replacing underscores with hyphens and removing spaces.
+info()    { echo -e "${BOLD}[*]${NORMAL} $*"; }
+success() { echo -e "${GREEN}[+]${NORMAL} $*"; }
+fail()    { echo -e "${RED}[-]${NORMAL} $*"; }
+
+# Runs a command in the background, animating a Braille spinner inside the
+# status bracket. Resolves to [+] done. or [-] failed. on the same line.
+# Captured output is printed below on failure for diagnosis.
+run_task() {
+    local msg=$1; shift
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0 tmp
+    tmp=$(mktemp)
+    "$@" > "$tmp" 2>&1 &
+    local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${BOLD}[%s]${NORMAL} %s..." "${frames:$(( i % 10 )):1}" "$msg"
+        (( i++ ))
+        sleep 0.1
+    done
+    wait "$pid"
+    local exit_code=$?
+    if (( exit_code == 0 )); then
+        printf "\r${GREEN}[+]${NORMAL} %s..." "$msg"
+        print_right "$(( ${#msg} + 7 ))" "$GREEN" "done"
+    else
+        printf "\r${RED}[-]${NORMAL} %s..." "$msg"
+        print_right "$(( ${#msg} + 7 ))" "$RED" "failed"
+        cat "$tmp"
+    fi
+    rm -f "$tmp"
+    return "$exit_code"
+}
+
+print_right() {
+    local prefix_len=$1 color=$2 word=$3
+    local pad=$(( COLS - prefix_len - ${#word} ))
+    (( pad < 1 )) && pad=1
+    printf "%*s${color}%s${NORMAL}\033[K\n" "$pad" "" "$word"
+}
+
+draw_bar() {
+    local pct=$1 width=40 filled empty bar="" i
+    filled=$(( pct * width / 100 ))
+    empty=$(( width - filled ))
+    for (( i=0; i<filled; i++ )); do bar+="█"; done
+    for (( i=0; i<empty; i++ )); do bar+="░"; done
+    printf "[%s] %3d%%" "$bar" "$pct"
+}
+
 get_qcow_name() {
     echo "$(basename "$1" | cut -d "." -f 1 | sed -e 's/_/-/g' -e 's/ //g').qcow2"
 }
 
-# Function to display usage information
 usage() {
     echo "Usage: $(basename "$0") [OPTIONS] [URL]"
     echo ""
@@ -60,169 +108,178 @@ while [[ $# -gt 0 ]]; do
         -k|--keyboard)    keyboard="$2";   shift 2 ;;
         -m|--memory)      memory="$2";     shift 2 ;;
         -s|--storage)     storage="$2";    shift 2 ;;
-        --min-id)         min_vm_id="$2"; shift 2 ;;
-        --max-id)         max_vm_id="$2"; shift 2 ;;
+        --min-id)         min_vm_id="$2";  shift 2 ;;
+        --max-id)         max_vm_id="$2";  shift 2 ;;
         -h|--help)        usage; exit 0 ;;
-        -*)               echo -e "${RED}Unknown option: $1${NORMAL}"; usage; exit 2 ;;
+        -*)               fail "Unknown option: $1"; usage; exit 2 ;;
         *)                url="$1"; shift ;;
     esac
 done
 
 # Validate VM ID range
 if (( max_vm_id != 0 && max_vm_id <= min_vm_id )); then
-    echo -e "${RED}--max-id ($max_vm_id) must be greater than --min-id ($min_vm_id).${NORMAL}\n"; exit 2
+    fail "--max-id ($max_vm_id) must be greater than --min-id ($min_vm_id)."; exit 2
 fi
 
 # Root check
-[[ $EUID -ne 0 ]] && { echo -e "${RED}This script must be run as root.${NORMAL}"; exit 2; }
+[[ $EUID -ne 0 ]] && { fail "This script must be run as root."; exit 2; }
 
 # Create VM Id
 old_vm_id=$( cut -d ":" -f 1 /etc/pve/.vmlist | grep "[0-9]" | tr -d '"' | sort -nr | head -n 1)
 vm_id=$(( ${old_vm_id:-0} + 1 ))
 (( vm_id < min_vm_id )) && vm_id=$min_vm_id
 if (( max_vm_id > 0 && vm_id >= max_vm_id )); then
-    echo -e "${RED}No available VM ID in range [$min_vm_id, $max_vm_id).${NORMAL}\n"; exit 2
+    fail "No available VM ID in range [$min_vm_id, $max_vm_id)."; exit 2
 fi
 
-# Change to Image dir
-cd "$images_dir" || { echo -e "${RED} Can not enter $images_dir ${NORMAL}\n"; exit 2; }
+# Change to image dir
+cd "$images_dir" || { fail "Cannot enter $images_dir"; exit 2; }
 
-# Download if a URL was provided
-if [ -z "$url" ];
-then
-    echo -e "${BLUE} No URL provided, searching for local files. ${NORMAL}"
-else
+# 1. Download
+if [ -n "$url" ]; then
     download_name=$(basename "$url")
-
-    if echo "$download_name" | grep -qE "\.(rar|zip|ova|7z)$";
-    then
-        wget "$url" -O "$download_name" || { echo -e "${RED}Download failed: $url${NORMAL}\n"; exit 2; }
+    if ! echo "$download_name" | grep -qE "\.(rar|zip|ova|7z)$"; then
+        fail "URL does not point to a .zip, .7z, .rar or .ova file."; exit 2
+    fi
+    # wget is special-cased: its progress bar is shown below the status line,
+    # then cursor-up resolves [*] -> [+] or [-] when the download finishes.
+    printf "${BOLD}[*]${NORMAL} Downloading %s...\n" "$download_name"
+    wget -q --show-progress "$url" -O "$download_name" 2>&1
+    exit_code=$?
+    printf "\033[2A\r"
+    if (( exit_code == 0 )); then
+        printf "${GREEN}[+]${NORMAL} Downloading %s..." "$download_name"
+        print_right "$(( ${#download_name} + 19 ))" "$GREEN" "done"
+        printf "\n"
     else
-        echo -e "${RED} No .zip, .7z, .rar or .ova File. ${NORMAL}\n";
-        exit 2;
+        printf "${RED}[-]${NORMAL} Downloading %s..." "$download_name"
+        print_right "$(( ${#download_name} + 19 ))" "$RED" "failed"
+        printf "\n"; exit 2
     fi
 fi
 
-# Extract all archives, looping until no more are found (handles nested archives)
-echo -e "${BLUE} Extracting archives. ${NORMAL}\n"
-extracted=1
-while [ $extracted -eq 1 ]; do
-    extracted=0
+# 2. Extract — entire loop runs as one background task
+extract_all() {
+    local extracted=1 file
+    while [ $extracted -eq 1 ]; do
+        extracted=0
 
-    file=$(find "$images_dir"/ -maxdepth 2 -name '*.zip' | head -n 1)
-    if [ -n "$file" ];
-    then
-        command -v unzip &>/dev/null || apt install -y unzip
-        unzip "$file" || { echo -e "${RED}Failed to extract $file${NORMAL}\n"; exit 2; }
-        rm "$file"
-        extracted=1
+        file=$(find "$images_dir"/ -maxdepth 2 -name '*.zip' | head -n 1)
+        if [ -n "$file" ]; then
+            command -v unzip &>/dev/null || apt install -y unzip
+            unzip -q "$file" || return 1
+            rm "$file"; extracted=1
+        fi
+
+        file=$(find "$images_dir"/ -maxdepth 2 -name '*.7z' | head -n 1)
+        if [ -n "$file" ]; then
+            command -v p7zip &>/dev/null || apt install -y p7zip
+            p7zip -d "$file" || return 1
+            extracted=1
+        fi
+
+        file=$(find "$images_dir"/ -maxdepth 2 -name '*.rar' | head -n 1)
+        if [ -n "$file" ]; then
+            command -v unrar &>/dev/null || return 1
+            unrar x -inul "$file" || return 1
+            rm "$file"; extracted=1
+        fi
+
+        file=$(find "$images_dir"/ -maxdepth 2 -name '*.ova' | head -n 1)
+        if [ -n "$file" ]; then
+            tar -xf "$file" || return 1
+            rm "$file"; extracted=1
+        fi
+    done
+}
+run_task "Extracting" extract_all || exit 2
+
+# 3. Convert — find the source file in the parent shell so qcow_name is available afterwards
+source_file=$(find "$images_dir"/ -maxdepth 2 -name '*.vdi' | head -n 1)
+[ -z "$source_file" ] && \
+    source_file=$(find "$images_dir"/ -maxdepth 2 -name '*.vmdk' -printf '%s\t%p\n' \
+        | sort -n | cut -f2- | head -n 1)
+
+if [ -n "$source_file" ]; then
+    qcow_name=$(get_qcow_name "$source_file")
+    if [[ "$source_file" == *.vdi ]]; then
+        run_task "Converting $(basename "$source_file")" \
+            qemu-img convert -f vdi -O qcow2 "$source_file" "$qcow_name" || exit 2
+    else
+        run_task "Converting $(basename "$source_file")" \
+            qemu-img convert -O qcow2 "$source_file" "$qcow_name" || exit 2
+        find "$images_dir"/ -maxdepth 2 -name '*.vmdk' -delete
     fi
+    rm -f "$source_file"
+fi
 
-    file=$(find "$images_dir"/ -maxdepth 2 -name '*.7z' | head -n 1)
-    if [ -n "$file" ]; 
-    then
-        command -v p7zip &>/dev/null || apt install -y p7zip
-        p7zip -d "$file" || { echo -e "${RED}Failed to extract $file${NORMAL}\n"; exit 2; }
-        extracted=1
-    fi
-
-    file=$(find "$images_dir"/ -maxdepth 2 -name '*.rar' | head -n 1)
-    if [ -n "$file" ]; 
-    then
-        command -v unrar &>/dev/null || { echo -e "${RED}unrar not found. Install the non-free 'unrar' package (requires non-free apt repo).${NORMAL}\n"; exit 2; }
-        unrar x "$file" || { echo -e "${RED}Failed to extract $file${NORMAL}\n"; exit 2; }
-        rm "$file"
-        extracted=1
-    fi
-
-    file=$(find "$images_dir"/ -maxdepth 2 -name '*.ova' | head -n 1)
-    if [ -n "$file" ];
-    then
-        tar -xf "$file" || { echo -e "${RED}Failed to extract $file${NORMAL}\n"; exit 2; }
-        rm "$file"
-        extracted=1
-    fi
-done
-echo -e "${GREEN} Archive extraction complete. ${NORMAL}\n"
-
-
-file=$(find "$images_dir"/ -maxdepth 2 -name '*.vdi' | head -n 1)
-if [ -n "$file" ];
-then
-    echo -e "${BLUE} Try to convert $file to qcow file. ${NORMAL}\n"
-    qcow_name=$(get_qcow_name "$file")
-    qemu-img convert -f vdi -O qcow2 "$file" "$qcow_name" || { echo -e "${RED}Failed to convert $file${NORMAL}\n"; exit 2; }
-    echo -e "${GREEN} Converting done! (vdi2qcow) ${NORMAL}\n"
-    rm "$file"
+# Stage qcow2 in VM directory
+if [ -n "${qcow_name:-}" ] && [ -f "$qcow_name" ]; then
+    mkdir "$vm_id" || { fail "Failed to create staging directory $vm_id"; exit 2; }
 else
-    echo -e "${BLUE} No .vdi File found. ${NORMAL}"
+    fail "No qcow2 image found to import."; exit 2
 fi
+cp ./*.qcow2 "$vm_id/" || { fail "Failed to copy qcow2 to staging directory."; exit 2; }
+rm -f ./*.mf ./*.ovf ./*.qcow2
 
-# Sort files from smallest to largest. Sometimes a small vmdk will be used as descriptor with
-# larger data/extent vmdks. This helps to handle that situation.
-file=$(find "$images_dir"/ -maxdepth 2 -name '*.vmdk' -printf '%s\t%p\n' | sort -n | cut -f2- | head -n 1)
-if [ -n "$file" ];
-then
-    echo -e "${BLUE} Try to convert $file to qcow file. ${NORMAL}\n"
-    qcow_name=$(get_qcow_name "$file")
-    qemu-img convert -O qcow2 "$file" "$qcow_name" || { echo -e "${RED}Failed to convert $file${NORMAL}\n"; exit 2; }
-    echo -e "${GREEN} Converting done! (vmdk2qcow) ${NORMAL}\n"
-    find "$images_dir"/ -maxdepth 2 -name '*.vmdk' -delete
-else
-    echo -e "${BLUE} No .vmdk File found. ${NORMAL}"
-fi
+# 4. Create VM
+name=$(find "$images_dir"/"$vm_id"/ -name '*.qcow2' | head -n 1 \
+    | rev | cut -d "/" -f 1 | rev | cut -d "." -f 1 \
+    | sed 's/-disk-\?[0-9]*$//' | tr '[:upper:]' '[:lower:]' | tr '_' '-')
 
-# Create directory if the qcow file exists
-echo -e "${BLUE} Try to Copy qcow File ${NORMAL}\n"
-if [ -n "${qcow_name:-}" ] && [ -f "$qcow_name" ];
-then
-    mkdir "$vm_id" || { echo -e "${RED}Failed to create directory $vm_id${NORMAL}\n"; exit 2; }
-else
-    echo -e "${RED} Cannot create new directory. (/$vm_id). ${NORMAL}\n"; 
-    exit 2;
-fi
+create_vm() {
+    qm create "$vm_id" \
+    --net0 e1000,bridge="$bridge" \
+    --acpi yes \
+    --cores "$cores" \
+    --keyboard "$keyboard" \
+    --memory "$memory" \
+    --name "$name" \
+    --nameserver "$dns" \
+    --ostype l26 \
+    --sockets 1 \
+    --onboot yes \
+    --kvm yes
+}
+run_task "Creating VM $vm_id ($name)" create_vm || exit 2
 
-# Copy qcow File in VM directory
-cp ./*.qcow2 "$vm_id/" || { echo -e "${RED}Can not copy qcow file to Directory.${NORMAL}\n"; exit 2; }
-
-# Remove old files
-echo -e "${BLUE} Removing old files. ${NORMAL}\n"
-rm -f ./*.mf
-rm -f ./*.ovf
-rm -f ./*.qcow2
-echo -e "${GREEN} Removing done! ${NORMAL}\n"
-
-# Create VM
-echo -e "${BLUE} Create VM. ${NORMAL}\n"
-name=$(find "$images_dir"/"$vm_id"/ -name '*.qcow2' | head -n 1 | rev | cut -d "/" -f 1 | rev | cut -d "." -f 1 | sed 's/-disk-\?[0-9]*$//' | tr '[:upper:]' '[:lower:]' | tr '_' '-')
-qm create "$vm_id" \
---net0 e1000,bridge="$bridge" \
---acpi yes \
---cores "$cores" \
---keyboard "$keyboard" \
---memory "$memory" \
---name "$name" \
---nameserver "$dns" \
---ostype l26 \
---sockets 1 \
---onboot yes \
---kvm yes || { echo -e "${RED} Fail to create VM ${NORMAL}\n"; exit 2; }
-echo -e "${GREEN} VM created."
-
-# Import Disk
-echo -e "${BLUE} Try to import Disk ${NORMAL}\n"
+# 5. Import disk — progress bar with spinner inside bracket
 disk_path=$(find "$images_dir"/"$vm_id"/ -name '*.qcow2' | head -n 1)
-qm importdisk "$vm_id" "$disk_path" "$storage" || { echo -e "${RED} Disk import failed. ${NORMAL}\n"; exit 2; }
-echo -e "${GREEN} Disk imported Successfully."
+tmp=$(mktemp)
+frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+i=0
+qm importdisk "$vm_id" "$disk_path" "$storage" > "$tmp" 2>&1 &
+pid=$!
+while kill -0 "$pid" 2>/dev/null; do
+    pct=$(grep -oP '\(\K[0-9]+(?=\.[0-9]+%)' "$tmp" 2>/dev/null | tail -1)
+    frame="${frames:$(( i % 10 )):1}"
+    if [[ -n "$pct" ]]; then
+        printf "\r${BOLD}[%s]${NORMAL} Importing disk... %s" "$frame" "$(draw_bar "$pct")"
+    else
+        printf "\r${BOLD}[%s]${NORMAL} Importing disk..." "$frame"
+    fi
+    (( i++ ))
+    sleep 0.3
+done
+wait "$pid"
+if (( $? == 0 )); then
+    printf "\r${GREEN}[+]${NORMAL} Importing disk... %s" "$(draw_bar 100)"
+    print_right 69 "$GREEN" "done"
+else
+    printf "\r${RED}[-]${NORMAL} Importing disk..."
+    print_right 22 "$RED" "failed"
+    cat "$tmp"; rm -f "$tmp"; exit 2
+fi
+rm -f "$tmp"
 rm -rf "${images_dir:?}/${vm_id:?}"
 
-# Set config file
-vm_config=/etc/pve/qemu-server/"$vm_id".conf
+# 6. Configure VM
+configure_vm() {
+    local vm_config=/etc/pve/qemu-server/"$vm_id".conf
+    sed -i '1s/^/bios: seabios\nbootdisk: ide0\n/' "$vm_config" &&
+    sed -i '/boot:/d' "$vm_config" &&
+    sed -i 's/^unused/ide/g' "$vm_config"
+}
+run_task "Configuring VM" configure_vm || exit 2
 
-# Edit config file
-echo -e "${BLUE} Edit Config from VM ($vm_config). ${NORMAL}\n"
-sed -i '1s/^/bios: seabios\nbootdisk: ide0\n/' "$vm_config"
-sed -i '/boot:/d' "$vm_config"
-sed -i 's/^unused/ide/g' "$vm_config"
-
-echo -e "${GREEN} $0 done ${NORMAL}\n"
+success "VM $vm_id ($name) is ready."
