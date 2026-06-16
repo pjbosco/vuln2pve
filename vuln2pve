@@ -275,10 +275,10 @@ wait "$pid"
 exit_code=$?
 if (( exit_code == 0 )); then
     printf "\r${GREEN}[+]${NORMAL} Importing disk..."
-    print_right 22 "$GREEN" "done"
+    print_right 21 "$GREEN" "done"
 else
     printf "\r${RED}[-]${NORMAL} Importing disk..."
-    print_right 22 "$RED" "failed"
+    print_right 21 "$RED" "failed"
     cat "$tmp"; rm -f "$tmp"; exit 2
 fi
 rm -f "$tmp"
