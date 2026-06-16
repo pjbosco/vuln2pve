@@ -28,14 +28,16 @@ BOLD="\e[1m"
 GREEN="\e[1;32m"
 RED="\e[1;31m"
 COLS=$(tput cols 2>/dev/null || echo 80)
+STATUS_COL=$(( COLS - 15 ))
+(( STATUS_COL < 50 )) && STATUS_COL=50
 
 info()    { echo -e "${BOLD}[*]${NORMAL} $*"; }
 success() { echo -e "${GREEN}[+]${NORMAL} $*"; }
 fail()    { echo -e "${RED}[-]${NORMAL} $*"; }
 
 # Runs a command in the background, animating a Braille spinner inside the
-# status bracket. Resolves to [+] done. or [-] failed. on the same line.
-# Captured output is printed below on failure for diagnosis.
+# status bracket. Resolves to [+]/[-] with right-aligned done/failed on the
+# same line, bar cleared. Captured output is printed below on failure.
 run_task() {
     local msg=$1; shift
     local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
@@ -62,11 +64,31 @@ run_task() {
     return "$exit_code"
 }
 
+# Prints word right-aligned at STATUS_COL, then clears to end of line.
 print_right() {
     local prefix_len=$1 color=$2 word=$3
-    local pad=$(( COLS - prefix_len - ${#word} ))
+    local pad=$(( STATUS_COL - prefix_len - ${#word} ))
     (( pad < 1 )) && pad=1
     printf "%*s${color}%s${NORMAL}\033[K\n" "$pad" "" "$word"
+}
+
+# Animates a spinner+progress bar for a background pid reading from a temp file.
+# Caller must set $frames, $i, $tmp, $pid, and provide the label.
+# On completion caller handles the final resolved line.
+progress_loop() {
+    local label=$1 pct_pattern=$2
+    while kill -0 "$pid" 2>/dev/null; do
+        local pct frame
+        pct=$(tr '\r' '\n' < "$tmp" 2>/dev/null | grep -oP "$pct_pattern" | tail -1)
+        frame="${frames:$(( i % 10 )):1}"
+        if [[ -n "$pct" ]]; then
+            printf "\r${BOLD}[%s]${NORMAL} %s... %s" "$frame" "$label" "$(draw_bar "$pct")"
+        else
+            printf "\r${BOLD}[%s]${NORMAL} %s..." "$frame" "$label"
+        fi
+        (( i++ ))
+        sleep 0.3
+    done
 }
 
 draw_bar() {
@@ -135,27 +157,27 @@ fi
 # Change to image dir
 cd "$images_dir" || { fail "Cannot enter $images_dir"; exit 2; }
 
-# 1. Download
+# 1. Download — spinner + our progress bar parsed from wget stderr; bar clears on completion
 if [ -n "$url" ]; then
     download_name=$(basename "$url")
     if ! echo "$download_name" | grep -qE "\.(rar|zip|ova|7z)$"; then
         fail "URL does not point to a .zip, .7z, .rar or .ova file."; exit 2
     fi
-    # wget is special-cased: its progress bar is shown below the status line,
-    # then cursor-up resolves [*] -> [+] or [-] when the download finishes.
-    printf "${BOLD}[*]${NORMAL} Downloading %s...\n" "$download_name"
-    wget -q --show-progress "$url" -O "$download_name" 2>&1
+    tmp=$(mktemp); frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'; i=0
+    wget -q --show-progress "$url" -O "$download_name" 2>"$tmp" &
+    pid=$!
+    progress_loop "Downloading $download_name" '[0-9]+(?=%)'
+    wait "$pid"
     exit_code=$?
-    printf "\033[2A\r"
     if (( exit_code == 0 )); then
-        printf "${GREEN}[+]${NORMAL} Downloading %s..." "$download_name"
+        printf "\r${GREEN}[+]${NORMAL} Downloading %s..." "$download_name"
         print_right "$(( ${#download_name} + 19 ))" "$GREEN" "done"
-        printf "\n"
     else
-        printf "${RED}[-]${NORMAL} Downloading %s..." "$download_name"
+        printf "\r${RED}[-]${NORMAL} Downloading %s..." "$download_name"
         print_right "$(( ${#download_name} + 19 ))" "$RED" "failed"
-        printf "\n"; exit 2
+        rm -f "$tmp"; exit 2
     fi
+    rm -f "$tmp"
 fi
 
 # 2. Extract — entire loop runs as one background task
@@ -243,28 +265,17 @@ create_vm() {
 }
 run_task "Creating VM $vm_id ($name)" create_vm || exit 2
 
-# 5. Import disk — progress bar with spinner inside bracket
+# 5. Import disk — spinner + progress bar; bar clears on completion
 disk_path=$(find "$images_dir"/"$vm_id"/ -name '*.qcow2' | head -n 1)
-tmp=$(mktemp)
-frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-i=0
+tmp=$(mktemp); frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'; i=0
 qm importdisk "$vm_id" "$disk_path" "$storage" > "$tmp" 2>&1 &
 pid=$!
-while kill -0 "$pid" 2>/dev/null; do
-    pct=$(grep -oP '\(\K[0-9]+(?=\.[0-9]+%)' "$tmp" 2>/dev/null | tail -1)
-    frame="${frames:$(( i % 10 )):1}"
-    if [[ -n "$pct" ]]; then
-        printf "\r${BOLD}[%s]${NORMAL} Importing disk... %s" "$frame" "$(draw_bar "$pct")"
-    else
-        printf "\r${BOLD}[%s]${NORMAL} Importing disk..." "$frame"
-    fi
-    (( i++ ))
-    sleep 0.3
-done
+progress_loop "Importing disk" '\(\K[0-9]+(?=\.[0-9]+%)'
 wait "$pid"
-if (( $? == 0 )); then
-    printf "\r${GREEN}[+]${NORMAL} Importing disk... %s" "$(draw_bar 100)"
-    print_right 69 "$GREEN" "done"
+exit_code=$?
+if (( exit_code == 0 )); then
+    printf "\r${GREEN}[+]${NORMAL} Importing disk..."
+    print_right 22 "$GREEN" "done"
 else
     printf "\r${RED}[-]${NORMAL} Importing disk..."
     print_right 22 "$RED" "failed"
