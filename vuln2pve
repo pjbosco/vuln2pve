@@ -32,11 +32,11 @@ STATUS_COL=$(( COLS - 15 ))
 (( STATUS_COL < 50 )) && STATUS_COL=50
 
 info()    { echo -e "${BOLD}[*]${NORMAL} $*"; }
-success() { echo -e "${GREEN}[+]${NORMAL} $*"; }
-fail()    { echo -e "${RED}[-]${NORMAL} $*"; }
+success() { echo -e "${GREEN}[✓]${NORMAL} $*"; }
+fail()    { echo -e "${RED}[✗]${NORMAL} $*"; }
 
 # Runs a command in the background, animating a Braille spinner inside the
-# status bracket. Resolves to [+]/[-] with right-aligned done/failed on the
+# status bracket. Resolves to [✓]/[✗] with right-aligned done/failed on the
 # same line, bar cleared. Captured output is printed below on failure.
 run_task() {
     local msg=$1; shift
@@ -53,10 +53,10 @@ run_task() {
     wait "$pid"
     local exit_code=$?
     if (( exit_code == 0 )); then
-        printf "\r${GREEN}[+]${NORMAL} %s..." "$msg"
+        printf "\r${GREEN}[✓]${NORMAL} %s..." "$msg"
         print_right "$(( ${#msg} + 7 ))" "$GREEN" "done"
     else
-        printf "\r${RED}[-]${NORMAL} %s..." "$msg"
+        printf "\r${RED}[✗]${NORMAL} %s..." "$msg"
         print_right "$(( ${#msg} + 7 ))" "$RED" "failed"
         cat "$tmp"
     fi
@@ -170,10 +170,10 @@ if [ -n "$url" ]; then
     wait "$pid"
     exit_code=$?
     if (( exit_code == 0 )); then
-        printf "\r${GREEN}[+]${NORMAL} Downloading %s..." "$download_name"
+        printf "\r${GREEN}[✓]${NORMAL} Downloading %s..." "$download_name"
         print_right "$(( ${#download_name} + 19 ))" "$GREEN" "done"
     else
-        printf "\r${RED}[-]${NORMAL} Downloading %s..." "$download_name"
+        printf "\r${RED}[✗]${NORMAL} Downloading %s..." "$download_name"
         print_right "$(( ${#download_name} + 19 ))" "$RED" "failed"
         rm -f "$tmp"; exit 2
     fi
@@ -274,10 +274,10 @@ progress_loop "Importing disk" '\(\K[0-9]+(?=\.[0-9]+%)'
 wait "$pid"
 exit_code=$?
 if (( exit_code == 0 )); then
-    printf "\r${GREEN}[+]${NORMAL} Importing disk..."
+    printf "\r${GREEN}[✓]${NORMAL} Importing disk..."
     print_right 21 "$GREEN" "done"
 else
-    printf "\r${RED}[-]${NORMAL} Importing disk..."
+    printf "\r${RED}[✗]${NORMAL} Importing disk..."
     print_right 21 "$RED" "failed"
     cat "$tmp"; rm -f "$tmp"; exit 2
 fi
