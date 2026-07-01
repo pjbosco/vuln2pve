@@ -97,7 +97,7 @@ draw_bar() {
     empty=$(( width - filled ))
     for (( i=0; i<filled; i++ )); do filled_bar+="█"; done
     for (( i=0; i<empty; i++ )); do empty_bar+="░"; done
-    printf "[${GREEN}%s${NORMAL}%s] %3d%%" "$filled_bar" "$empty_bar" "$pct"
+    printf "${BOLD}[${GREEN}%s${NORMAL}%s${BOLD}]${NORMAL} %3d%%" "$filled_bar" "$empty_bar" "$pct"
 }
 
 get_qcow_name() {
@@ -145,6 +145,10 @@ fi
 
 # Root check
 [[ $EUID -ne 0 ]] && { fail "This script must be run as root."; exit 2; }
+
+# Suppress keyboard echo during animated output; restore on exit
+stty -echo 2>/dev/null
+trap 'stty echo 2>/dev/null' EXIT INT TERM
 
 # Create VM Id
 old_vm_id=$( cut -d ":" -f 1 /etc/pve/.vmlist | grep "[0-9]" | tr -d '"' | sort -nr | head -n 1)
