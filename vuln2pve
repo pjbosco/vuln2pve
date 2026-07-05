@@ -278,10 +278,10 @@ progress_loop "Importing disk" '\(\K[0-9]+(?=\.[0-9]+%)'
 wait "$pid"
 exit_code=$?
 if (( exit_code == 0 )); then
-    printf "\r${GREEN}[✓]${NORMAL} Importing disk..."
+    printf '\r%b[✓]%b Importing disk...' "$GREEN" "$NORMAL"
     print_right 21 "$GREEN" "done"
 else
-    printf "\r${RED}[✗]${NORMAL} Importing disk..."
+    printf '\r%b[✗]%b Importing disk...' "$RED" "$NORMAL"
     print_right 21 "$RED" "failed"
     cat "$tmp"; rm -f "$tmp"; exit 2
 fi
