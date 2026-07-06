@@ -6,7 +6,7 @@
 
 ## Berschreibung
 
-vuln2pve ist ein kleines Shell Skript, was es erlaubt VMs von Vulnhub zu downloaden
+vuln2pve ist ein kleines Shell Skript, was es erlaubt VMs von [Vulnhub](https://www.vulnhub.com/) zu downloaden
 und diese dann automatisiert auf Proxmox VE zu erstellen.
 Es soll manuellen Arbeitsaufwand verringern. Daraus folgt, dass mit CTFs schneller begonnen werden kann. 😉
 
@@ -22,6 +22,10 @@ wget https://raw.githubusercontent.com/53845714nF/vuln2pve/main/vuln2pve -O /opt
 ```
 
 ## Verwendung
+
+### Demo
+
+![](img/demo.gif)
 
 ### Einstellungen für deine Umgebung
 

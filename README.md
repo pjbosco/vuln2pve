@@ -6,7 +6,7 @@
 
 ## Description
 
-vuln2pve is a small Shell Script that downloads VM's from Vulnhub and converts them to the Proxmox VE format.
+vuln2pve is a small Shell Script that downloads VM's from [Vulnhub](https://www.vulnhub.com/) and converts them to the Proxmox VE format.
 Helpful to avoid manual steps so you can start quickly with your CTF's. 😉
 
 There was a similar project at: [ProxKube](https://github.com/Ap3x/ProxKube) \
@@ -21,6 +21,10 @@ wget https://raw.githubusercontent.com/53845714nF/vuln2pve/main/vuln2pve -O /opt
 ```
 
 ## Usage
+
+### Demo
+
+![](img/demo.gif)
 
 ### Configuration file
 
