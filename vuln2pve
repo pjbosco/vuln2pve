@@ -239,14 +239,22 @@ if [ -n "$source_file" ]; then
     rm -f "$source_file"
 fi
 
+# If no vdi/vmdk was found to convert, check for an existing qcow2 in images_dir
+# (covers re-runs after a partial failure, and archives that contain qcow2 directly)
+if [ -z "${qcow_name:-}" ]; then
+    qcow_name=$(basename "$(find "$images_dir"/ -maxdepth 1 -name '*.qcow2' | head -n 1)")
+fi
+
 # Stage qcow2 in VM directory
 if [ -n "${qcow_name:-}" ] && [ -f "$qcow_name" ]; then
     mkdir "$vm_id" || { fail "Failed to create staging directory $vm_id"; exit 2; }
+    cp ./*.qcow2 "$vm_id/" || { fail "Failed to copy qcow2 to staging directory."; exit 2; }
+    rm -f ./*.mf ./*.ovf ./*.qcow2
+elif [ -n "$(find "$images_dir/$vm_id" -maxdepth 1 -name '*.qcow2' 2>/dev/null | head -n 1)" ]; then
+    : # already staged from a previous run, skip mkdir/cp
 else
     fail "No qcow2 image found to import."; exit 2
 fi
-cp ./*.qcow2 "$vm_id/" || { fail "Failed to copy qcow2 to staging directory."; exit 2; }
-rm -f ./*.mf ./*.ovf ./*.qcow2
 
 # 4. Create VM
 name=$(find "$images_dir"/"$vm_id"/ -name '*.qcow2' | head -n 1 \
